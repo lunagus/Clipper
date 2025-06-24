@@ -55,6 +55,8 @@ class ClipperGUI:
         self.video_duration = 0  # in seconds
         self.dragging_start = False
         self.dragging_end = False
+        self.save_as_enabled = tk.BooleanVar(value=False)
+        self.advanced_enabled = tk.BooleanVar(value=False)
 
         self.setup_ui()
 
@@ -212,6 +214,47 @@ class ClipperGUI:
             fieldbackground=[("focus", c["primary_light"])],
             bordercolor=[("focus", c["primary"])],
         )
+        # Progress bar style (blue)
+        style.layout(
+            "Blue.Horizontal.TProgressbar",
+            [
+                (
+                    "Horizontal.Progressbar.trough",
+                    {
+                        "children": [
+                            (
+                                "Horizontal.Progressbar.pbar",
+                                {"side": "left", "sticky": "ns"},
+                            )
+                        ],
+                        "sticky": "nswe",
+                    },
+                )
+            ],
+        )
+        style.configure(
+            "Blue.Horizontal.TProgressbar",
+            troughcolor=c["surface_elevated"],
+            bordercolor=c["surface_border"],
+            background=c["primary"],
+            lightcolor=c["primary"],
+            darkcolor=c["primary"],
+            thickness=16,
+        )
+        # Add Danger style for Cancel button
+        style.configure(
+            "Danger.TButton",
+            font=("Segoe UI", 10, "bold"),
+            padding=(16, 8),
+            background=c["error"],
+            foreground=c["text_primary"],
+            relief="flat",
+            borderwidth=0,
+        )
+        style.map(
+            "Danger.TButton",
+            background=[("active", "#b71c1c"), ("pressed", "#b71c1c")],
+        )
 
     def setup_ui(self):
         self.root.configure(bg="#1A1A1A")
@@ -244,16 +287,14 @@ class ClipperGUI:
         )
         self.file_info_label.grid(row=2, column=0, pady=(8, 0), sticky=tk.W)
         # Trimming toggle (pill style)
-        trim_toggle_frame = ttk.Frame(main_container)
-        trim_toggle_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(8, 8))
         self.trim_check = ttk.Checkbutton(
-            trim_toggle_frame,
+            main_container,
             text="Enable Video Trimming",
             variable=self.trim_enabled,
             command=self.toggle_trim_section,
             style="Pill.TCheckbutton",
         )
-        self.trim_check.grid(row=0, column=0, sticky=tk.W, padx=4, pady=2)
+        self.trim_check.grid(row=3, column=0, sticky=tk.W, pady=(8, 8), padx=0)
         # Timeline section (pill/box style)
         self.timeline_frame = ttk.LabelFrame(
             main_container,
@@ -318,42 +359,205 @@ class ClipperGUI:
         self.output_entry = ttk.Entry(
             main_container, textvariable=self.custom_output_name, font=("Segoe UI", 9)
         )
-        self.output_entry.grid(row=6, column=0, sticky=(tk.W, tk.E), pady=(0, 12))
-        # Encoding preset (no box, just label)
-        ttk.Label(
-            main_container, text="Encoding Preset:", style="Subtitle.TLabel"
-        ).grid(row=7, column=0, sticky=tk.W, pady=(8, 0))
-        preset_frame = ttk.Frame(main_container)
-        preset_frame.grid(row=8, column=0, sticky=(tk.W, tk.E))
-        presets = [
+        self.output_entry.grid(row=6, column=0, sticky=(tk.W, tk.E), pady=(0, 4))
+        # Save As checkbox
+        self.save_as_enabled = tk.BooleanVar(value=False)
+        self.save_as_checkbox = ttk.Checkbutton(
+            main_container,
+            text="Custom Output Name and Location",
+            variable=self.save_as_enabled,
+            style="Pill.TCheckbutton",
+        )
+        self.save_as_checkbox.grid(row=7, column=0, sticky=tk.W, pady=(0, 8))
+        # Preset row (always visible)
+        ttk.Label(main_container, text="Preset:", style="Subtitle.TLabel").grid(
+            row=8, column=0, sticky=tk.W, pady=(8, 8)
+        )
+        self.preset_options = [
             ("Very Fast", "veryfast"),
             ("Fast", "fast"),
             ("Medium", "medium"),
             ("Slow", "slow"),
             ("Very Slow", "veryslow"),
         ]
-        for i, (label, value) in enumerate(presets):
-            preset_btn = ttk.Radiobutton(
-                preset_frame,
+        self.selected_preset = tk.StringVar(value="medium")
+        self.preset_radios = []
+        preset_buttons_frame = ttk.Frame(main_container)
+        preset_buttons_frame.grid(row=9, column=0, sticky="ew", pady=(0, 8))
+        main_container.columnconfigure(0, weight=1)
+        for i in range(len(self.preset_options)):
+            preset_buttons_frame.columnconfigure(i, weight=1)
+        for i, (label, value) in enumerate(self.preset_options):
+            rb = ttk.Radiobutton(
+                preset_buttons_frame,
                 text=label,
                 variable=self.selected_preset,
                 value=value,
-                command=self.update_output_name,
                 style="Pill.TRadiobutton",
             )
-            preset_btn.grid(row=0, column=i, padx=(0, 8), pady=2)
-        # Status section (no progress bar)
+            rb.grid(row=0, column=i, padx=4, pady=2, sticky="ew")
+            self.preset_radios.append(rb)
+        # Advanced checkbox
+        self.advanced_enabled = tk.BooleanVar(value=False)
+        self.advanced_checkbox = ttk.Checkbutton(
+            main_container,
+            text="Advanced",
+            variable=self.advanced_enabled,
+            command=self.toggle_advanced_options,
+            style="Pill.TCheckbutton",
+        )
+        self.advanced_checkbox.grid(row=10, column=0, sticky=tk.W, pady=(0, 0))
+        # Advanced options frame (hidden by default)
+        self.advanced_frame = ttk.Frame(main_container)
+        self.advanced_frame.grid(row=11, column=0, sticky=(tk.W, tk.E), pady=(8, 0))
+        self.advanced_frame.columnconfigure(0, weight=1)
+        self.advanced_frame.columnconfigure(1, weight=1)
+        self.advanced_frame.columnconfigure(2, weight=1)
+        self.advanced_frame.columnconfigure(3, weight=1)
+        self.advanced_frame.columnconfigure(4, weight=1)
+        # Video Codec
+        ttk.Label(
+            self.advanced_frame, text="Video Codec:", style="Subtitle.TLabel"
+        ).grid(row=0, column=0, sticky=tk.W)
+        self.codec_options = [
+            ("H.264 (MP4)", "libx264"),
+            ("H.265 (HEVC)", "libx265"),
+        ]
+        self.selected_codec = tk.StringVar(value="H.264 (MP4)")
+        self.codec_menu = ttk.Combobox(
+            self.advanced_frame,
+            textvariable=self.selected_codec,
+            values=[label for label, val in self.codec_options],
+            state="readonly",
+            width=12,
+            font=("Segoe UI", 9),
+        )
+        self.codec_menu.grid(row=1, column=0, sticky=(tk.W, tk.E), padx=(0, 8))
+        self.codec_menu.current(0)
+        self.codec_menu.configure(style="TCombobox")
+        # CRF
+        ttk.Label(self.advanced_frame, text="CRF:", style="Subtitle.TLabel").grid(
+            row=0, column=1, sticky=tk.W
+        )
+        self.crf_options = ["18", "20", "22", "24", "28"]
+        self.selected_crf = tk.StringVar(value="20")
+        self.crf_menu = ttk.Combobox(
+            self.advanced_frame,
+            textvariable=self.selected_crf,
+            values=self.crf_options,
+            state="readonly",
+            width=6,
+            font=("Segoe UI", 9),
+        )
+        self.crf_menu.grid(row=1, column=1, sticky=(tk.W, tk.E), padx=(0, 8))
+        self.crf_menu.current(1)
+        self.crf_menu.configure(style="TCombobox")
+        # FPS
+        ttk.Label(self.advanced_frame, text="FPS:", style="Subtitle.TLabel").grid(
+            row=0, column=2, sticky=tk.W
+        )
+        self.fps_options = ["24", "30", "60", "120"]
+        self.selected_fps = tk.StringVar(value="120")
+        self.fps_menu = ttk.Combobox(
+            self.advanced_frame,
+            textvariable=self.selected_fps,
+            values=self.fps_options,
+            state="readonly",
+            width=6,
+            font=("Segoe UI", 9),
+        )
+        self.fps_menu.grid(row=1, column=2, sticky=(tk.W, tk.E), padx=(0, 8))
+        self.fps_menu.current(3)
+        self.fps_menu.configure(style="TCombobox")
+        # Audio Bitrate
+        ttk.Label(
+            self.advanced_frame, text="Audio Bitrate:", style="Subtitle.TLabel"
+        ).grid(row=0, column=3, sticky=tk.W)
+        self.audio_bitrate_options = ["96k", "128k", "192k", "256k", "320k"]
+        self.selected_audio_bitrate = tk.StringVar(value="128k")
+        self.audio_bitrate_menu = ttk.Combobox(
+            self.advanced_frame,
+            textvariable=self.selected_audio_bitrate,
+            values=self.audio_bitrate_options,
+            state="readonly",
+            width=8,
+            font=("Segoe UI", 9),
+        )
+        self.audio_bitrate_menu.grid(row=1, column=3, sticky=(tk.W, tk.E), padx=(0, 8))
+        self.audio_bitrate_menu.current(1)
+        self.audio_bitrate_menu.configure(style="TCombobox")
+        # Resolution
+        ttk.Label(
+            self.advanced_frame, text="Resolution:", style="Subtitle.TLabel"
+        ).grid(row=0, column=4, sticky=tk.W)
+        self.resolution_options = [
+            ("1920x1080", "1920:1080"),
+            ("1280x720", "1280:720"),
+            ("2560x1440", "2560:1440"),
+            ("3840x2160", "3840:2160"),
+        ]
+        self.selected_resolution = tk.StringVar(value="1920:1080")
+        self.resolution_menu = ttk.Combobox(
+            self.advanced_frame,
+            textvariable=self.selected_resolution,
+            values=[label for label, val in self.resolution_options],
+            state="readonly",
+            width=16,
+            font=("Segoe UI", 9),
+        )
+        self.resolution_menu.grid(row=1, column=4, sticky=(tk.W, tk.E))
+        self.resolution_menu.current(0)
+        self.resolution_menu.configure(style="TCombobox")
+        self.advanced_frame.grid_remove()
         self.status_label = ttk.Label(
             main_container, text="Ready to process video", style="Info.TLabel"
         )
-        self.status_label.grid(row=9, column=0, pady=(16, 12))
+        self.status_label.grid(row=12, column=0, pady=(16, 4))
+        # Progress bar frame (fixed height)
+        self.progress_frame = ttk.Frame(main_container, height=24)
+        self.progress_frame.grid_propagate(False)
+        self.progress_frame.grid(row=13, column=0, sticky="ew", pady=(0, 8))
+        # Progress bar (inside frame)
+        self.progress_bar = ttk.Progressbar(
+            self.progress_frame,
+            orient="horizontal",
+            length=300,
+            mode="determinate",
+            maximum=100,
+            style="Blue.Horizontal.TProgressbar",
+        )
+        self.progress_bar.pack(fill="x", expand=True)
+        self.progress_bar.pack_forget()  # Hide initially
+        # Button group frame
+        button_frame = ttk.Frame(main_container)
+        button_frame.grid(row=14, column=0, pady=(0, 8), sticky=(tk.W, tk.E))
+        button_frame.columnconfigure(0, weight=1)
+        button_frame.columnconfigure(1, weight=0)
+        # Process Video button (center)
         self.process_btn = ttk.Button(
-            main_container,
+            button_frame,
             text="Process Video",
             command=self.process_video,
             style="Success.TButton",
         )
-        self.process_btn.grid(row=10, column=0, pady=(0, 8))
+        self.process_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        # Cancel button (center, hidden by default)
+        self.cancel_btn = ttk.Button(
+            button_frame,
+            text="Cancel",
+            command=self.cancel_processing,
+            style="Danger.TButton",
+        )
+        self.cancel_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.cancel_btn.grid_remove()
+        # Reset button (always to the right)
+        self.reset_btn = ttk.Button(
+            button_frame,
+            text="Reset",
+            command=self.reset_settings,
+            style="Secondary.TButton",
+        )
+        self.reset_btn.grid(row=0, column=1, sticky=tk.E)
         # Bind events
         self.input_file.trace("w", self.on_file_selected)
         self.start_time.trace("w", self.on_time_changed)
@@ -372,6 +576,8 @@ class ClipperGUI:
             self.timeline_frame.grid_remove()
             self.start_entry.config(state="disabled")
             self.end_entry.config(state="disabled")
+        self.root.update_idletasks()
+        self.root.geometry("")
 
     def browse_input_file(self):
         filetypes = [
@@ -602,64 +808,147 @@ class ClipperGUI:
             if end_seconds > self.video_duration:
                 messagebox.showerror("Error", "End time cannot exceed video duration!")
                 return
-        input_path_obj = Path(self.input_file.get())
-        output_name = self.custom_output_name.get()
-        if not output_name.endswith(".mp4"):
-            output_name += ".mp4"
-        output_path = input_path_obj.parent / output_name
-        # No confirmation dialog, just start processing
+        # Save As dialog if enabled
+        output_path = None
+        if self.save_as_enabled.get():
+            output_path = filedialog.asksaveasfilename(
+                defaultextension=".mp4",
+                filetypes=[("MP4 files", "*.mp4"), ("All files", "*.*")],
+                initialfile=self.custom_output_name.get(),
+            )
+            if not output_path:
+                return  # Cancel if no path selected
+        else:
+            input_path_obj = Path(self.input_file.get())
+            output_name = self.custom_output_name.get()
+            if not output_name.endswith(".mp4"):
+                output_name += ".mp4"
+            output_path = input_path_obj.parent / output_name
         self.start_processing(str(output_path))
 
     def start_processing(self, output_path):
         self.is_processing = True
-        self.process_btn.config(state="disabled")
+        self.cancel_requested = False
+        self.ffmpeg_process = None
+        self.process_btn.grid_remove()
+        self.cancel_btn.grid()  # Show cancel button centered
+        self.reset_btn.grid(row=0, column=1, sticky=tk.E)
+        self.reset_btn.config(state="disabled")
         self.status_label.config(
             text="Processing video... Please wait.", style="Info.TLabel"
         )
-        thread = threading.Thread(target=self.run_ffmpeg, args=(output_path,))
+        self.progress_bar["value"] = 0
+        self.progress_bar.pack(fill="x", expand=True)
+        thread = threading.Thread(
+            target=self.run_ffmpeg_with_progress, args=(output_path,)
+        )
         thread.daemon = True
+        self.processing_thread = thread
         thread.start()
 
-    def run_ffmpeg(self, output_path):
+    def run_ffmpeg_with_progress(self, output_path):
         try:
             input_path = self.input_file.get()
-            preset = self.selected_preset.get()
+            # Get options
+            if self.advanced_enabled.get():
+                codec_label = self.selected_codec.get()
+                codec = dict(self.codec_options)[codec_label]
+                crf = self.selected_crf.get()
+                fps = self.selected_fps.get()
+                audio_bitrate = self.selected_audio_bitrate.get()
+                res_label = self.selected_resolution.get()
+                resolution = dict(self.resolution_options)[res_label]
+            else:
+                codec = "libx264"
+                crf = "20"
+                fps = "120"
+                audio_bitrate = "128k"
+                resolution = "1920:1080"
+            preset_label = self.selected_preset.get()
+            preset = dict(self.preset_options)[preset_label]
             command = ["ffmpeg", "-y", "-i", input_path, "-sn"]
-            if self.trim_enabled.get():
+            trim = self.trim_enabled.get()
+            if trim:
                 start_seconds = self.time_to_seconds(self.start_time.get())
                 duration = self.time_to_seconds(self.end_time.get()) - start_seconds
                 command.extend(["-ss", str(start_seconds), "-t", str(duration)])
             command.extend(
                 [
                     "-vf",
-                    "scale=1920:1080,fps=120",
+                    f"scale={resolution},fps={fps}",
                     "-vcodec",
-                    "libx264",
+                    codec,
                     "-crf",
-                    "24",
+                    crf,
                     "-preset",
                     preset,
                     "-acodec",
                     "aac",
                     "-b:a",
-                    "128k",
+                    audio_bitrate,
                     output_path,
                 ]
             )
-            result = subprocess.run(command, capture_output=True, text=True, check=True)
-            self.root.after(
-                0,
-                self.processing_complete,
-                True,
-                "Video processing completed successfully!",
-            )
-        except subprocess.CalledProcessError as e:
-            # Only show error if it's not about subtitles or overwriting
-            if "subtitle" in e.stderr or "Invalid argument" in e.stderr:
-                error_msg = "FFmpeg warning: Subtitle or output file issue ignored."
+            # Calculate total duration for progress
+            if trim:
+                total_duration = duration
             else:
-                error_msg = f"FFmpeg error: {e.stderr}"
-            self.root.after(0, self.processing_complete, False, error_msg)
+                total_duration = self.video_duration
+            if total_duration <= 0:
+                total_duration = 1  # Avoid division by zero
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+            )
+            self.ffmpeg_process = process
+            import re
+
+            time_pattern = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
+            last_percent = 0
+            while True:
+                if getattr(self, "cancel_requested", False):
+                    try:
+                        process.terminate()
+                    except Exception:
+                        pass
+                    self.root.after(
+                        0,
+                        self.processing_complete,
+                        False,
+                        "Processing cancelled by user.",
+                    )
+                    return
+                line = process.stderr.readline()
+                if not line:
+                    break
+                match = time_pattern.search(line)
+                if match:
+                    h, m, s = match.groups()
+                    current = int(h) * 3600 + int(m) * 60 + float(s)
+                    percent = int((current / total_duration) * 100)
+                    percent = min(percent, 100)
+                    if percent != last_percent:
+                        last_percent = percent
+                        self.root.after(0, self.progress_bar.config, {"value": percent})
+            process.wait()
+            if process.returncode == 0:
+                self.root.after(
+                    0,
+                    self.processing_complete,
+                    True,
+                    "Video processing completed successfully!",
+                )
+            else:
+                self.root.after(
+                    0,
+                    self.processing_complete,
+                    False,
+                    "FFmpeg error: Processing failed.",
+                )
         except FileNotFoundError:
             error_msg = "FFmpeg not found! Please make sure FFmpeg is installed and available in your system PATH."
             self.root.after(0, self.processing_complete, False, error_msg)
@@ -667,9 +956,49 @@ class ClipperGUI:
             error_msg = f"Unexpected error: {str(e)}"
             self.root.after(0, self.processing_complete, False, error_msg)
 
+    def cancel_processing(self):
+        if not self.is_processing:
+            return
+        self.cancel_requested = True
+        self.cancel_btn.config(state="disabled")
+        self.status_label.config(text="Cancelling...", style="Error.TLabel")
+
+    def reset_settings(self):
+        if messagebox.askyesno("Reset", "Are you sure you want to reset all fields?"):
+            self.input_file.set("")
+            self.start_time.set("0:00")
+            self.end_time.set("0:00")
+            self.trim_enabled.set(False)
+            self.save_as_enabled.set(False)
+            self.custom_output_name.set("")
+            self.selected_preset.set("medium")
+            self.advanced_enabled.set(False)
+            self.selected_codec.set("H.264 (MP4)")
+            self.selected_crf.set("20")
+            self.selected_fps.set("120")
+            self.selected_audio_bitrate.set("128k")
+            self.selected_resolution.set("1920:1080")
+            self.file_info_label.config(text="No file selected", style="Info.TLabel")
+            self.status_label.config(text="Ready to process video", style="Info.TLabel")
+            self.progress_bar["value"] = 0
+            self.progress_bar.pack_forget()
+            self.process_btn.config(state="normal")
+            self.cancel_btn.grid_remove()
+            self.process_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+            self.reset_btn.grid(row=0, column=1, sticky=tk.E)
+            self.reset_btn.config(state="normal")
+            self.timeline_frame.grid_remove()
+            self.advanced_frame.grid_remove()
+
     def processing_complete(self, success, message):
         self.is_processing = False
+        self.cancel_btn.grid_remove()
+        self.process_btn.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.reset_btn.grid(row=0, column=1, sticky=tk.E)
+        self.reset_btn.config(state="normal")
         self.process_btn.config(state="normal")
+        self.progress_bar["value"] = 100 if success else 0
+        self.progress_bar.pack_forget()  # Hide after completion
         if success:
             self.status_label.config(text="✅ " + message, style="Success.TLabel")
             messagebox.showinfo("Success", message)
@@ -677,14 +1006,25 @@ class ClipperGUI:
             self.status_label.config(text="❌ Processing failed", style="Error.TLabel")
             messagebox.showerror("Error", message)
 
+    def toggle_advanced_options(self):
+        if self.advanced_enabled.get():
+            self.advanced_frame.grid()
+        else:
+            self.advanced_frame.grid_remove()
+        self.root.update_idletasks()
+        self.root.geometry("")
+
 
 def main():
     root = tk.Tk()
-    app = ClipperGUI(root)
+    ClipperGUI(root)
     root.update_idletasks()
-    x = (root.winfo_screenwidth() // 2) - (root.winfo_width() // 2)
-    y = (root.winfo_screenheight() // 2) - (root.winfo_height() // 2)
-    root.geometry(f"+{x}+{y}")
+    min_width = 700
+    min_height = root.winfo_height()
+    root.minsize(min_width, min_height)
+    x = (root.winfo_screenwidth() // 2) - (min_width // 2)
+    y = (root.winfo_screenheight() // 2) - (min_height // 2)
+    root.geometry(f"{min_width}x{min_height}+{x}+{y}")
     root.mainloop()
 
 
