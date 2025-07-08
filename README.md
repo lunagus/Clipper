@@ -1,43 +1,41 @@
-# Clipper - Video Trimming and Encoding Tool
+# Clipper - Video Trimmer, Encoder & Uploader
 
 A minimal, modern, and accessible GUI application for video trimming and encoding using FFmpeg. Built with Python and Tkinter, Clipper provides an intuitive interface for video processing and uploading tasks with a clean, dark material-inspired design.
 
 ## Features
 
 ### 🎬 Core Functionality
-- **Video File Support**: Browse for input video files (MP4, AVI, MOV, MKV, WMV, FLV)
+- **Video File Support**: Browse for input video files (MP4, AVI, MOV, MKV, WMV, FLV, WebM)
 - **Trimming**: Optional video trimming with interactive timeline and seekbar
 - **Auto Output Generation**: Intelligent filename generation with sanitization
 - **Encoding Presets**: Choose from Very Fast, Fast, Medium, Slow, Very Slow encoding presets
-- **Advanced Export Options**: Enable advanced mode to customize video codec (H.264/H.265/WebM), CRF (quality), FPS, audio bitrate, and resolution (including custom values)
-- **Multiple Output Formats**: Export to MP4 or WebM (VP9) with automatic extension handling
+- **Advanced Export Options**: Enable advanced mode to customize video codec, CRF, FPS, audio bitrate, container format, playback speed and resolution (including custom values)
+- **Multiple Output Formats**: Export to MP4, MKV or WebM with automatic extension handling
 - **File Uploading**: Optionally lets you send your processed video directly to great file hosting websites, choose your preferred service, upload with one click, and instantly get a shareable URL.
 
 ### 🎨 User Interface
-- **Modern Dark Theme**: Clean, material-inspired dark interface
-- **Interactive Timeline**: Click and drag timeline for precise trimming
-- **Responsive Design**: Auto-adjusting window size and layout, including dynamic resizing when sections are shown/hidden
-- **Status Feedback**: Clear processing status and error messages
-- **Accessible Controls**: Pill-style buttons, styled radio buttons, and intuitive navigation
-- **Consistent Alignment**: All controls and labels are visually aligned for a professional look
-- **Dynamic Advanced Options**: Show/hide advanced export settings with a single checkbox
-- **Editable Dropdowns**: All advanced fields (CRF, FPS, Audio Bitrate, Resolution) allow both preset selection and custom user input, with validation
+- **Modern Dark Theme**: Clean, material-inspired UI with high contrast and pill-style buttons
+- **Interactive Timeline**: Click and drag handles for precise start/end trimming
+- **Responsive Design**: Auto-adjusting layout with dynamic resizing
+- **Advanced Mode Toggle**: Show/hide expert-level encoding controls
+- **Editable Dropdowns**: Fields allow preset or custom input with validation
+- **Real-Time Feedback**: Status updates, error messages, and progress bars
 
 ### ⚡ Performance
-- **Robust Error Handling**: Comprehensive error catching and user feedback, including display of FFmpeg error output
-- **FFmpeg Integration**: Direct FFmpeg command execution for optimal performance
-- **Memory Efficient**: Stream-based processing for large video files
-- **UI Responsiveness**: All controls are disabled during processing (except Cancel), and re-enabled after completion or error
+- **Robust Error Handling**: Comprehensive error catching and user feedback
+- **Threaded Processing**: Runs encoding and upload tasks in background threads to avoid UI freezes
+- **Memory Efficient**: Optimized command execution avoids unnecessary memory usage
 
 ## Installation
 
-### Prerequisites
-- Python 3.6 or higher
-- FFmpeg installed and available in system PATH
+### Bundled Executable
+A prebuilt `.exe` (with bundled FFmpeg and Python) is available in the [Releases](https://github.com/lunagus/Clipper/releases) page.
 
-### Running Clipper
-1. Clone or download the `clipper.py` file
-2. Run the application:
+### Prerequisites
+- Python 3.6+
+- FFmpeg installed in system PATH, or bundled in a `bin/` folder
+
+### Run from Source
 ```bash
 python clipper.py
 ```
@@ -56,22 +54,16 @@ python clipper.py
 3. **Visual Feedback**: The timeline shows the selected region in blue
 4. **Drag Handles**: Click and drag the green (start) and red (end) handles for precise control
 
-### Encoding Presets
-- **Very Fast**: Quick encoding, larger file size
-- **Fast**: Good balance of speed and quality
-- **Medium**: Default preset, balanced performance
-- **Slow**: Higher quality, longer processing time
-- **Very Slow**: Maximum quality, longest processing time
-
-### Advanced Export Options
-1. **Show Advanced Options**: Check the "Advanced" checkbox below the preset selection
-2. **Customize Export**:
-   - **Video Codec**: Choose H.264 (MP4), H.265 (HEVC), or WebM (VP9)
-   - **CRF**: Select or enter a custom quality value (lower is higher quality, 20 is default, full FFmpeg range supported)
-   - **FPS**: Choose or enter output frame rate (24, 30, 60, 120, or any custom value)
-   - **Audio Bitrate**: Select or enter audio quality (64k–320k, or choose "Remove Audio" to export video without audio)
-   - **Resolution**: Choose from 4K, 2K, 1080p, 720p, 480p, 360p, or enter a custom resolution (e.g., 236x556)
-3. **Hide Advanced Options**: Uncheck "Advanced" to return to simple mode (defaults: H.264, CRF 20, 120 FPS, 128k audio, 1920x1080)
+### Advanced Encoding Options
+- **Video Codec**: H.264, H.265 (HEVC), or VP9
+- **CRF (Quality)**: Choose any value (lower number = better quality)
+- **FPS**: 24, 30, 60, 120 or custom frame rate
+- **Audio Bitrate**: 64k to 320k or strip audio completely
+- **Resolution**: Choose preset or custom resolution
+- **Speed**: Apply video/audio speed multiplier (e.g., 2x faster)
+- **Track Selection**: Choose specific subtitle/audio stream
+- **Format**: Output to MP4, MKV, or WebM
+- **Hide Advanced Options**: Uncheck "Advanced" to return to simple mode
 
 ### Uploading Processed Videos
 - **Upload Services**: Upload your processed video to catbox.moe, uguu.se, or temp.sh directly from the app
@@ -81,12 +73,12 @@ python clipper.py
 
 ## Error Handling
 
-The application includes comprehensive error handling for:
-- Missing FFmpeg installation
-- Invalid video files
-- File permission issues
-- Invalid time ranges
-- Processing failures (with detailed FFmpeg error output)
+Clipper offers comprehensive feedback for:
+- Invalid input or missing files
+- Incorrect time formats
+- Missing FFmpeg or ffprobe
+- Encoding errors and limitations (e.g., subtitle font issues)
+- File size over upload limits
 
 ## Acknowledgements
 
@@ -140,4 +132,11 @@ A simple, anonymous file hosting service with a clean API and automatic file exp
 A minimalist, temporary file hosting service for quick sharing, with files expiring after 3 days.
 - **Website**: [https://temp.sh/](https://temp.sh/)
 - **Donate to temp.sh**: Bitcoin: bc1qrfugegr75h8d0zlhvydwkky0ayus5jm3jkqd87
+---
+
+## License
+
+This project is licensed under the GNU General Public License v3.0.  
+See the [LICENSE](./LICENSE) file for full details.
+
 ---
