@@ -1,6 +1,10 @@
-# Clipper - Video Trimmer, Encoder & Uploader
+# Clipper - Trimmer, Encoder & Uploader
 
 A minimal, modern, and accessible GUI application for video trimming and encoding using FFmpeg. Built with Python and Tkinter, Clipper provides an intuitive interface for video processing and uploading tasks with a clean, dark material-inspired design.
+
+## WHY?
+
+I wanted a quick, intuitive way to clip and encode video files from movies, game captures, and TV shows for personal use. Manually crafting FFmpeg commands every time was tedious and inefficient, especially due to different size constraints and resolution tweaks for every use case, so I built a lightweight GUI that covers most of the useful FFmpeg options, while remaining lightweight and fast, and adding upload and sharing features when needed.
 
 ## Features
 
