@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import subprocess
 import os
+import sys
 import threading
 from pathlib import Path
 import json
@@ -9,8 +10,18 @@ import re
 import urllib.request
 import urllib.parse
 import time
-from typing import Optional
+from typing import Optional, List
+from dataclasses import dataclass
 
+# Ensure FFmpeg and FFprobe work from bundled folder
+if getattr(sys, "frozen", False):
+    # Running from PyInstaller bundle
+    ffmpeg_dir = os.path.join(sys._MEIPASS, "bin")
+else:
+    # Running normally (script or IDE)
+    ffmpeg_dir = os.path.join(os.path.dirname(__file__), "bin")
+
+os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ["PATH"]
 
 # =============================================================================
 # CONSTANTS AND CONFIGURATION
@@ -64,9 +75,16 @@ ENCODING_PRESETS = [
 
 # Video Codecs
 VIDEO_CODECS = [
-    ("H.264 (MP4)", "libx264"),
+    ("H.264", "libx264"),
     ("H.265 (HEVC)", "libx265"),
-    ("WebM (VP9)", "libvpx-vp9"),
+    ("VP9", "libvpx-vp9"),
+]
+
+# Container Formats
+CONTAINER_FORMATS = [
+    ("MP4", "mp4"),
+    ("MKV", "mkv"),
+    ("WebM", "webm"),
 ]
 
 # CRF Values
@@ -88,33 +106,192 @@ RESOLUTION_OPTIONS = [
     ("640x360", "640:360"),
 ]
 
-# Upload Services
-UPLOAD_SERVICES = {
-    "catbox": {
-        "name": "catbox.moe",
-        "url": "https://catbox.moe/user/api.php",
-        "field_name": "fileToUpload",
-        "reqtype": "fileupload",
-        "max_size_mb": 200,  # 200 MB limit
-        "expiration": "Indefinite",
-    },
-    "uguu": {
-        "name": "uguu.se",
-        "url": "https://uguu.se/upload",
-        "field_name": "files[]",
-        "reqtype": None,
-        "max_size_mb": 134,  # 128 MiB ≈ 134 MB
-        "expiration": "~3 hours",
-    },
-    "tempsh": {
-        "name": "temp.sh",
-        "url": "https://temp.sh/upload",
-        "field_name": "file",
-        "reqtype": None,
-        "max_size_mb": 4096,  # 4 GB limit
-        "expiration": "3 days",
-    },
-}
+
+@dataclass
+class SubtitleStream:
+    index: int
+    map_index: int
+    codec_name: str
+    language: str
+    title: str = ""
+
+
+@dataclass
+class AudioStream:
+    index: int
+    codec_name: str
+    language: str
+    title: str = ""
+
+
+@dataclass
+class UploadService:
+    key: str
+    name: str
+    url: str
+    field_name: str
+    reqtype: Optional[str]
+    max_size_mb: int
+    expiration: str
+
+
+UPLOAD_SERVICES_LIST: List[UploadService] = [
+    UploadService(
+        key="catbox",
+        name="catbox.moe",
+        url="https://catbox.moe/user/api.php",
+        field_name="fileToUpload",
+        reqtype="fileupload",
+        max_size_mb=200,
+        expiration="Indefinite",
+    ),
+    UploadService(
+        key="uguu",
+        name="uguu.se",
+        url="https://uguu.se/upload",
+        field_name="files[]",
+        reqtype=None,
+        max_size_mb=134,
+        expiration="~3 hours",
+    ),
+    UploadService(
+        key="tempsh",
+        name="temp.sh",
+        url="https://temp.sh/upload",
+        field_name="file",
+        reqtype=None,
+        max_size_mb=4096,
+        expiration="3 days",
+    ),
+]
+
+
+def get_upload_service_by_key(key: str) -> Optional[UploadService]:
+    for service in UPLOAD_SERVICES_LIST:
+        if service.key == key:
+            return service
+    return None
+
+
+class FFmpegCommandBuilder:
+    def __init__(self):
+        self.cmd = ["ffmpeg", "-y"]
+        self._vf_filters = []
+        self._af_filters = []
+        self._has_subtitles = False
+        self._has_speed = False
+        self._setpts_filter = None
+
+    def with_input(self, path):
+        self.cmd.extend(["-i", path])
+        return self
+
+    def with_trim(self, start, duration):
+        self.cmd.extend(["-ss", str(start), "-t", str(duration)])
+        return self
+
+    def with_hybrid_trim(self, start, duration):
+        self.cmd.extend(["-ss", str(start)])
+        self.input_added = True
+        return self
+
+    def with_post_input_trim(self, offset, duration):
+        self.cmd.extend(["-ss", str(offset), "-t", str(duration)])
+        return self
+
+    def with_video_settings(self, scale, fps):
+        filters = []
+        if scale and scale != "" and scale != "None":
+            filters.append(f"scale={scale}")
+        if fps and fps != "" and fps != "None":
+            filters.append(f"fps={fps}")
+        if filters:
+            self._vf_filters.extend(filters)
+        return self
+
+    def with_subtitles(self, sub_path, si_opt):
+        self._has_subtitles = True
+        self._vf_filters.insert(0, f"subtitles='{sub_path}{si_opt}'")
+        return self
+
+    def with_speed(self, speed: float):
+        if speed != 1.0:
+            self._has_speed = True
+            self._setpts_filter = f"setpts=PTS/{speed}"
+            # Audio speed adjustment (atempo only supports 0.5-2.0, so chain if needed)
+            af_filters = []
+            remaining = speed
+            while remaining > 2.0:
+                af_filters.append("atempo=2.0")
+                remaining /= 2.0
+            while remaining < 0.5:
+                af_filters.append("atempo=0.5")
+                remaining /= 0.5
+            af_filters.append(f"atempo={remaining:.2f}")
+            self._af_filters.extend(af_filters)
+        return self
+
+    def with_extra(self, extra_args):
+        self.cmd.extend(extra_args)
+        return self
+
+    def with_map(self, map_args):
+        self.cmd.extend(map_args)
+        return self
+
+    def with_codec(self, codec, crf, preset):
+        self.cmd.extend(["-c:v", codec, "-crf", str(crf), "-preset", preset])
+        return self
+
+    def with_audio(self, codec, bitrate):
+        self.cmd.extend(["-c:a", codec, "-b:a", bitrate])
+        return self
+
+    def build(self, output_path):
+        vf_chain = list(self._vf_filters)
+        if self._has_speed and self._setpts_filter:
+            vf_chain.append(self._setpts_filter)
+        if vf_chain:
+            self.cmd.extend(["-vf", ",".join(vf_chain)])
+        if self._af_filters:
+            self.cmd.extend(["-filter:a", ",".join(self._af_filters)])
+        return self.cmd + [output_path]
+
+    def get_upload_service_info(self, service: str) -> Optional[UploadService]:
+        """
+        Get information about an upload service as a dataclass.
+        """
+        return get_upload_service_by_key(service)
+
+    def validate_file_size_for_upload(self, file_path: str, service: str) -> bool:
+        """
+        Validate that the file size is within the upload service's limits.
+        Args:
+            file_path: Path to the file to upload
+            service: Upload service key (catbox, uguu, tempsh)
+        Returns:
+            True if file size is acceptable, False otherwise
+        """
+        try:
+            file_size_bytes = os.path.getsize(file_path)
+            file_size_mb = file_size_bytes / (1024 * 1024)  # Convert to MB
+            service_config = get_upload_service_by_key(service)
+            if not service_config:
+                messagebox.showerror("Error", f"Unknown upload service: {service}")
+                return False
+            max_size_mb = service_config.max_size_mb
+            service_name = service_config.name
+            if file_size_mb > max_size_mb:
+                messagebox.showerror(
+                    "File Too Large",
+                    f"File size ({file_size_mb:.1f} MB) exceeds the limit for {service_name} ({max_size_mb} MB).\n\n"
+                    f"Please choose a different upload service or reduce the file size.",
+                )
+                return False
+            return True
+        except (OSError, FileNotFoundError) as e:
+            messagebox.showerror("Error", f"Could not check file size: {e}")
+            return False
 
 
 class ClipperGUI:
@@ -170,6 +347,41 @@ class ClipperGUI:
         self.processing_thread: Optional[threading.Thread] = None
 
         self.setup_ui()
+
+        # --- Widget grouping for UI state ---
+        self.main_controls = [
+            self.input_entry,
+            self.browse_btn,
+            self.save_as_checkbox,
+            self.output_entry,
+            self.process_btn,
+            self.reset_btn,
+            self.trim_check,
+            self.advanced_checkbox,
+            self.start_entry,
+            self.end_entry,
+        ]
+        self.advanced_controls = [
+            self.codec_menu,
+            self.crf_menu,
+            self.fps_menu,
+            self.audio_bitrate_menu,
+            self.resolution_menu,
+            self.container_menu,
+            self.track_selection_frame,
+            self.speed_menu,
+        ]
+        self.upload_controls = [
+            self.catbox_radio,
+            self.uguu_radio,
+            self.tempsh_radio,
+            self.upload_btn,
+            self.upload_checkbox,
+            self.copy_url_btn,
+            self.open_in_browser_btn,
+        ]
+        self.file_controls = [self.open_file_btn, self.show_in_explorer_btn]
+        self.cancel_control = [self.cancel_btn]
 
     def setup_styles(self) -> None:
         """Configure the application's visual styles and themes."""
@@ -379,6 +591,39 @@ class ClipperGUI:
             darkcolor=c["primary"],
             thickness=16,
         )
+
+    def create_scrollable_checkbox_frame(self, parent, max_height=60):
+        """Create a compact scrollable frame with checkboxes for track selection."""
+        # Create a frame to hold the canvas and scrollbar
+        container_frame = ttk.Frame(parent)
+        container_frame.columnconfigure(0, weight=1)
+        container_frame.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(
+            container_frame,
+            height=max_height,
+            borderwidth=0,
+            background="#23272b",
+            highlightthickness=0,
+        )
+        scrollbar = ttk.Scrollbar(
+            container_frame, orient="vertical", command=canvas.yview
+        )
+        scroll_frame = ttk.Frame(canvas)
+
+        scroll_frame.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        # Pack the container frame into the parent
+        container_frame.pack(fill="both", expand=True)
+
+        return scroll_frame, canvas, scrollbar
 
     def setup_ui(self) -> None:
         """Set up the main user interface components."""
@@ -594,13 +839,15 @@ class ClipperGUI:
         self.advanced_frame.columnconfigure(2, weight=1)
         self.advanced_frame.columnconfigure(3, weight=1)
         self.advanced_frame.columnconfigure(4, weight=1)
+        self.advanced_frame.columnconfigure(5, weight=1)
+        self.advanced_frame.columnconfigure(6, weight=1)
 
         # Video Codec
         ttk.Label(
             self.advanced_frame, text="Video Codec:", style="Subtitle.TLabel"
         ).grid(row=0, column=0, sticky=tk.W)
 
-        self.selected_codec = tk.StringVar(value="H.264 (MP4)")
+        self.selected_codec = tk.StringVar(value="H.264")
         self.codec_menu = ttk.Combobox(
             self.advanced_frame,
             textvariable=self.selected_codec,
@@ -633,7 +880,7 @@ class ClipperGUI:
         ttk.Label(self.advanced_frame, text="FPS:", style="Subtitle.TLabel").grid(
             row=0, column=2, sticky=tk.W
         )
-        self.selected_fps = tk.StringVar(value=FPS_OPTIONS[2])  # Default to "60"
+        self.selected_fps = tk.StringVar(value="60")  # Default to "60"
         self.fps_menu = ttk.Combobox(
             self.advanced_frame,
             textvariable=self.selected_fps,
@@ -674,6 +921,72 @@ class ClipperGUI:
             font=("Segoe UI", 9),
         )
         self.resolution_menu.grid(row=1, column=4, sticky=(tk.W, tk.E), padx=(0, 8))
+
+        # Container Format
+        ttk.Label(
+            self.advanced_frame, text="Container Format:", style="Subtitle.TLabel"
+        ).grid(row=0, column=5, sticky=tk.W)
+        self.selected_container = tk.StringVar(value="mp4")
+        self.container_menu = ttk.Combobox(
+            self.advanced_frame,
+            textvariable=self.selected_container,
+            values=[label for label, val in CONTAINER_FORMATS],
+            state="readonly",
+            width=8,
+            font=("Segoe UI", 9),
+        )
+        self.container_menu.grid(row=1, column=5, sticky=(tk.W, tk.E), padx=(0, 8))
+        self.container_menu.current(0)
+        self.container_menu.configure(style="TCombobox")
+        self.container_menu.bind("<<ComboboxSelected>>", self.on_container_changed)
+
+        # Speed Multiplier
+        ttk.Label(self.advanced_frame, text="Speed:", style="Subtitle.TLabel").grid(
+            row=0, column=6, sticky=tk.W
+        )
+        self.selected_speed = tk.StringVar(value="1.0x (Normal)")
+        self.speed_menu = ttk.Combobox(
+            self.advanced_frame,
+            textvariable=self.selected_speed,
+            values=["1.0x (Normal)", "0.5x", "0.75x", "1.5x", "1.75x", "2.0x", "4.0x"],
+            state="readonly",
+            width=10,
+            font=("Segoe UI", 9),
+        )
+        self.speed_menu.grid(row=1, column=6, sticky=(tk.W, tk.E), padx=(0, 8))
+
+        # Subtitles and Audio Tracks (expandable checkbox, always single-select)
+        self.include_tracks = tk.BooleanVar(value=False)
+        self.include_tracks_checkbox = ttk.Checkbutton(
+            self.advanced_frame,
+            text="Subtitles and Audio Tracks",
+            variable=self.include_tracks,
+            command=self.toggle_track_selection,
+            style="Pill.TCheckbutton",
+        )
+        self.include_tracks_checkbox.grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
+        self.include_tracks_checkbox.grid_remove()
+        # Track selection frame (hidden by default, shown when checkbox is checked)
+        self.track_selection_frame = ttk.Frame(self.advanced_frame)
+        self.track_selection_frame.grid(
+            row=3, column=0, columnspan=6, sticky="ew", pady=(4, 8)
+        )
+        self.track_selection_frame.columnconfigure(0, weight=1)
+        self.track_selection_frame.columnconfigure(1, weight=1)
+        self.track_selection_frame.grid_remove()
+        # Subtitle track selection (left side)
+        self.subtitle_streams = []
+        self.subtitle_combobox = None
+        self.subtitle_combobox_holder = ttk.Frame(self.track_selection_frame)
+        self.subtitle_combobox_holder.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self.subtitle_combobox_holder.grid_remove()
+        # Audio track selection (right side)
+        self.audio_streams = []
+        self.audio_combobox = None
+        self.audio_combobox_holder = ttk.Frame(self.track_selection_frame)
+        self.audio_combobox_holder.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        self.audio_combobox_holder.grid_remove()
+
         self.advanced_frame.grid_remove()
 
     def _setup_status_section(self, container):
@@ -772,7 +1085,7 @@ class ClipperGUI:
         self.upload_btn = ttk.Button(
             upload_service_row,
             text="Upload",
-            command=self.upload_to_catbox,
+            command=self.upload_to_selected_service,
             style="Primary.TButton",
         )
         self.upload_btn.grid(row=0, column=4, sticky=tk.E, padx=(8, 0))
@@ -848,14 +1161,39 @@ class ClipperGUI:
     def on_file_selected(self, *args):
         input_path = self.input_file.get()
         if input_path and os.path.exists(input_path):
-            self.get_video_duration(input_path)
+            # Fetch duration in a background thread to avoid UI freeze
+            def _update_duration_bg():
+                self.get_video_duration(input_path)
+                self.root.after(0, self.draw_timeline)
+
+            threading.Thread(target=_update_duration_bg, daemon=True).start()
             self.update_output_name()
             filename = os.path.basename(input_path)
             self.file_info_label.config(
                 text=f"Selected: {filename}", style="Success.TLabel"
             )
+            # Detect subtitle and audio streams
+            subs = self.get_video_subtitle_streams(input_path)
+            self.subtitle_streams = subs
+            audio_streams = self.get_video_audio_streams(input_path)
+            self.audio_streams = audio_streams
+            self.audio_indices = [s.index for s in audio_streams]
+
+            # Show track selection checkbox if we have any tracks
+            if subs or audio_streams:
+                self.include_tracks_checkbox.grid()
+                # Setup track selection UI based on container format
+                self.setup_track_selection_ui(subs, audio_streams)
+            else:
+                self.include_tracks_checkbox.grid_remove()
+                self.include_tracks.set(False)
+                self.track_selection_frame.grid_remove()
+
             if not self.is_processing:
-                self.set_controls_state(False)
+                self.set_processing_ui_state(False)
+
+            # Update container-specific UI state
+            self.on_container_changed()
 
     def get_video_duration(self, video_path):
         try:
@@ -874,24 +1212,20 @@ class ClipperGUI:
             self.video_duration = float(data["format"]["duration"])
             self.end_time.set(self.seconds_to_time(self.video_duration))
             self.draw_timeline()
-        except Exception as e:
-            print(f"Error getting video duration: {e}")
+        except Exception:
             self.video_duration = 0
 
     def draw_timeline(self):
         self.timeline_canvas.delete("all")
         if self.video_duration <= 0:
             return
-
         canvas_width = self.timeline_canvas.winfo_width()
         if canvas_width <= 1:
             canvas_width = 800
-
         # Draw background
         self.timeline_canvas.create_rectangle(
             0, 25, canvas_width, 55, fill="#404040", outline="#505050", width=1
         )
-
         # Draw time markers
         for i in range(0, int(self.video_duration) + 1, 10):
             x = (i / self.video_duration) * canvas_width
@@ -903,13 +1237,11 @@ class ClipperGUI:
                 font=("Segoe UI", 7),
                 fill="#CCCCCC",
             )
-
         # Draw start and end handles
         start_seconds = self.time_to_seconds(self.start_time.get())
         end_seconds = self.time_to_seconds(self.end_time.get())
         start_x = (start_seconds / self.video_duration) * canvas_width
         end_x = (end_seconds / self.video_duration) * canvas_width
-
         # Start handle (green)
         self.timeline_canvas.create_rectangle(
             start_x - 8,
@@ -924,7 +1256,6 @@ class ClipperGUI:
         self.timeline_canvas.create_text(
             start_x, 70, text="START", font=("Segoe UI", 7, "bold"), fill="#4CAF50"
         )
-
         # End handle (red)
         self.timeline_canvas.create_rectangle(
             end_x - 8,
@@ -939,7 +1270,6 @@ class ClipperGUI:
         self.timeline_canvas.create_text(
             end_x, 70, text="END", font=("Segoe UI", 7, "bold"), fill="#F44336"
         )
-
         # Highlight selected region
         if start_x < end_x:
             self.timeline_canvas.create_rectangle(
@@ -952,6 +1282,8 @@ class ClipperGUI:
                 outline="#1976D2",
                 width=1,
             )
+        self.timeline_canvas.update_idletasks()
+        self.timeline_canvas.update()
 
     def on_timeline_click(self, event):
         if self.video_duration <= 0:
@@ -1145,24 +1477,21 @@ class ClipperGUI:
         if input_path:
             input_path_obj = Path(input_path)
             base_name = self.sanitize_filename(input_path_obj.stem)
-
-            # Remove only actual file extensions, not partial matches
             if input_path_obj.suffix.lower() in SUPPORTED_VIDEO_FORMATS:
                 base_name = input_path_obj.stem
-
             if self.trim_enabled.get():
                 start_str = self.start_time.get().replace(":", "-")
                 end_str = self.end_time.get().replace(":", "-")
                 output_name = f"{base_name}-{start_str}-{end_str}-clip"
             else:
                 output_name = f"{base_name}-clip"
-
-            # Extension based on codec
-            codec_label = self.selected_codec.get()
-            if codec_label == "WebM (VP9)":
-                output_name += ".webm"
-            else:
-                output_name += ".mp4"
+            # Extension based on container
+            container_label = self.selected_container.get()
+            ext = ".mp4"
+            for label, val in CONTAINER_FORMATS:
+                if label == container_label:
+                    ext = f".{val}"
+            output_name += ext
             self.custom_output_name.set(output_name)
 
     def _validate_inputs(self):
@@ -1206,6 +1535,67 @@ class ClipperGUI:
 
         return True
 
+    def set_processing_ui_state(self, processing: bool):
+        """Enable/disable widgets based on processing state using grouped widget lists."""
+        state = "disabled" if processing else "normal"
+        for widget in self.main_controls:
+            widget.config(state=state)
+        adv_state = state if self.advanced_enabled.get() else "disabled"
+        for widget in self.advanced_controls:
+            # Frame widgets don't have a state option, so skip them
+            if hasattr(widget, "config") and "state" in widget.config():
+                widget.config(state=adv_state)
+        # Explicitly handle speed_menu
+        if hasattr(self, "speed_menu"):
+            self.speed_menu.config(state=adv_state)
+        # Explicitly handle include_tracks_checkbox, subtitle_combobox, audio_combobox
+        if hasattr(self, "include_tracks_checkbox"):
+            self.include_tracks_checkbox.config(state=adv_state)
+        if hasattr(self, "subtitle_combobox") and self.subtitle_combobox:
+            self.subtitle_combobox.config(state=adv_state)
+        if hasattr(self, "audio_combobox") and self.audio_combobox:
+            self.audio_combobox.config(state=adv_state)
+        for widget in self.upload_controls:
+            widget.config(state=state)
+        for widget in self.file_controls:
+            widget.config(state=state)
+        # Cancel button always enabled during processing
+        for widget in self.cancel_control:
+            widget.config(state="normal" if processing else "disabled")
+
+    def get_output_path(self) -> Optional[str]:
+        """Centralized output file path and extension logic with logging and extension validation."""
+        container_label = self.selected_container.get()
+        ext = ".mp4"
+        for label, val in CONTAINER_FORMATS:
+            if label == container_label:
+                ext = f".{val}"
+        if self.save_as_enabled.get():
+            output_path = filedialog.asksaveasfilename(
+                defaultextension=ext,
+                filetypes=[
+                    (f"{container_label} files", f"*{ext}"),
+                    ("All files", "*.*"),
+                ],
+                initialfile=self.custom_output_name.get(),
+            )
+            if not output_path:
+                return None
+            # Validate extension (prevent double-extension)
+            base, file_ext = os.path.splitext(output_path)
+            if file_ext.lower() != ext:
+                output_path = base + ext
+            self.custom_output_name.set(os.path.basename(output_path))
+            return output_path
+        else:
+            input_path_obj = Path(self.input_file.get())
+            output_name = self.custom_output_name.get()
+            if not output_name.endswith(ext):
+                output_name_path = Path(output_name)
+                output_name = str(output_name_path.with_suffix(ext))
+            output_path = input_path_obj.parent / output_name
+            return str(output_path)
+
     def process_video(self):
         if self.is_processing:
             messagebox.showinfo(
@@ -1224,7 +1614,7 @@ class ClipperGUI:
             codec_label = self.selected_codec.get()
             try:
                 crf_val = int(crf)
-                if codec_label == "WebM (VP9)":
+                if codec_label == "VP9":
                     if not (0 <= crf_val <= 63):
                         raise ValueError
                 else:
@@ -1248,24 +1638,17 @@ class ClipperGUI:
             # Audio Bitrate
             audio_bitrate = self.selected_audio_bitrate.get()
             if audio_bitrate != "Remove Audio":
-                import re
-
-                if not re.match(r"^(\d{2,3})k$", audio_bitrate):
-                    messagebox.showerror(
-                        "Error",
-                        "Audio Bitrate must be in the form '96k', '128k', etc. (8k-512k). Or select 'Remove Audio'.",
-                    )
-                    return
-                ab_val = int(audio_bitrate[:-1])
-                if not (8 <= ab_val <= 512):
+                try:
+                    ab_val = int(audio_bitrate[:-1])
+                    if not (8 <= ab_val <= 512):
+                        raise ValueError
+                except Exception:
                     messagebox.showerror(
                         "Error", "Audio Bitrate must be between 8k and 512k."
                     )
                     return
             # Resolution
             res = self.selected_resolution.get()
-            import re
-
             if not re.match(r"^\d{2,5}x\d{2,5}$", res):
                 messagebox.showerror(
                     "Error",
@@ -1278,84 +1661,11 @@ class ClipperGUI:
                     "Error", "Resolution width and height must be between 16 and 7680."
                 )
                 return
-        # Save As dialog if enabled
-        output_path = None
-        if self.save_as_enabled.get():
-            # Extension based on codec
-            codec_label = self.selected_codec.get()
-            ext = ".webm" if codec_label == "WebM (VP9)" else ".mp4"
-            output_path = filedialog.asksaveasfilename(
-                defaultextension=ext,
-                filetypes=[
-                    ("WebM files", "*.webm"),
-                    ("MP4 files", "*.mp4"),
-                    ("All files", "*.*"),
-                ],
-                initialfile=self.custom_output_name.get(),
-            )
-            if not output_path:
-                return  # Cancel if no path selected
-            import os
-
-            self.custom_output_name.set(os.path.basename(output_path))
-        else:
-            input_path_obj = Path(self.input_file.get())
-            output_name = self.custom_output_name.get()
-            # Extension based on codec
-            codec_label = self.selected_codec.get()
-            ext = ".webm" if codec_label == "WebM (VP9)" else ".mp4"
-            if not output_name.endswith(ext):
-                # Use Path to reliably extract name without extension
-                output_name_path = Path(output_name)
-                output_name = str(output_name_path.with_suffix("")) + ext
-            output_path = input_path_obj.parent / output_name
+        # Use output path helper
+        output_path = self.get_output_path()
+        if not output_path:
+            return
         self.start_processing(str(output_path))
-
-    def set_controls_state(self, disabled):
-        state = "disabled" if disabled else "normal"
-        # Main controls
-        self.input_entry.config(state=state)
-        self.browse_btn.config(state=state)
-        self.save_as_checkbox.config(state=state)
-        self.output_entry.config(state=state)
-        self.process_btn.config(state=state)
-        self.reset_btn.config(state=state)
-        self.trim_check.config(state=state)
-        self.advanced_checkbox.config(state=state)
-        # Timeline controls
-        self.start_entry.config(state=state)
-        self.end_entry.config(state=state)
-        # Preset radios
-        for rb in self.preset_radios:
-            rb.config(state=state)
-        # Advanced controls
-        self.codec_menu.config(
-            state=state if self.advanced_enabled.get() else "disabled"
-        )
-        self.crf_menu.config(state=state if self.advanced_enabled.get() else "disabled")
-        self.fps_menu.config(state=state if self.advanced_enabled.get() else "disabled")
-        self.audio_bitrate_menu.config(
-            state=state if self.advanced_enabled.get() else "disabled"
-        )
-        self.resolution_menu.config(
-            state=state if self.advanced_enabled.get() else "disabled"
-        )
-        # Upload controls
-        self.catbox_radio.config(state=state)
-        self.uguu_radio.config(state=state)
-        self.tempsh_radio.config(state=state)
-        self.upload_btn.config(state=state)
-        self.upload_checkbox.config(state=state)
-        self.copy_url_btn.config(state=state)
-        self.open_in_browser_btn.config(state=state)
-        # Open/Show in Explorer
-        self.open_file_btn.config(state=state)
-        self.show_in_explorer_btn.config(state=state)
-        # Cancel button always enabled during processing
-        if disabled:
-            self.cancel_btn.config(state="normal")
-        else:
-            self.cancel_btn.config(state="disabled")
 
     def start_processing(self, output_path):
         self.is_processing = True
@@ -1370,7 +1680,7 @@ class ClipperGUI:
         )
         self.progress_bar["value"] = 0
         self.progress_bar.pack(fill="x", expand=True)
-        self.set_controls_state(True)
+        self.set_processing_ui_state(True)
         thread = threading.Thread(
             target=self.run_ffmpeg_with_progress, args=(output_path,)
         )
@@ -1382,7 +1692,9 @@ class ClipperGUI:
     def run_ffmpeg_with_progress(self, output_path):
         try:
             input_path = self.input_file.get()
-            # Get options
+            trimming = self.trim_enabled.get()
+            if self.video_duration <= 0:
+                self.get_video_duration(input_path)
             if self.advanced_enabled.get():
                 codec_label = self.selected_codec.get()
                 codec = dict(VIDEO_CODECS)[codec_label]
@@ -1394,54 +1706,165 @@ class ClipperGUI:
                 if res_label in preset_res_dict:
                     resolution = preset_res_dict[res_label]
                 else:
-                    # Accept custom input, convert "236x556" to "236:556"
                     resolution = res_label.replace("x", ":")
+                preset = self.selected_preset.get()
+                speed_label = self.selected_speed.get()
+                speed_value = 1.0
+                if speed_label.startswith("1.0"):
+                    speed_value = 1.0
+                else:
+                    speed_value = float(speed_label.split("x")[0])
+                container_label = self.selected_container.get().lower()
             else:
                 codec = "libx264"
                 crf = "20"
                 fps = "120"
                 audio_bitrate = "128k"
                 resolution = "1920:1080"
-            preset = self.selected_preset.get()
-            command = ["ffmpeg", "-y", "-i", input_path, "-sn"]
-            trim = self.trim_enabled.get()
-            if trim:
-                start_seconds = self.time_to_seconds(self.start_time.get())
-                duration = self.time_to_seconds(self.end_time.get()) - start_seconds
-                command.extend(["-ss", str(start_seconds), "-t", str(duration)])
-            command.extend(
-                [
-                    "-vf",
-                    f"scale={resolution},fps={fps}",
-                    "-vcodec",
-                    codec,
-                    "-crf",
-                    crf,
-                    "-preset",
-                    preset,
-                ]
+                preset = "medium"
+                speed_value = 1.0
+                container_label = "mp4"
+
+            def get_input_info(path):
+                try:
+                    cmd = [
+                        "ffprobe",
+                        "-v",
+                        "error",
+                        "-select_streams",
+                        "v:0",
+                        "-show_entries",
+                        "stream=width,height,r_frame_rate",
+                        "-of",
+                        "json",
+                        path,
+                    ]
+                    result = subprocess.run(
+                        cmd, capture_output=True, text=True, check=True
+                    )
+                    data = json.loads(result.stdout)
+                    stream = data["streams"][0]
+                    width = int(stream["width"])
+                    height = int(stream["height"])
+                    fps_val = eval(stream["r_frame_rate"])
+                    return width, height, fps_val
+                except Exception:
+                    return None, None, None
+
+            input_w, input_h, input_fps = get_input_info(input_path)
+            if self.advanced_enabled.get():
+                selected_subtitle = None
+                if (
+                    self.include_tracks.get()
+                    and self.subtitle_combobox
+                    and self.subtitle_combobox.winfo_ismapped()
+                ):
+                    idx = self.subtitle_combobox.current()
+                    if idx > 0 and idx <= len(self.subtitle_streams):
+                        selected_subtitle = self.subtitle_streams[idx - 1]
+                if (
+                    self.include_tracks.get()
+                    and self.audio_combobox
+                    and self.audio_combobox.winfo_ismapped()
+                ):
+                    idx = self.audio_combobox.current()
+                    if idx >= 0 and idx < len(self.audio_streams):
+                        selected_audio_index = self.audio_streams[idx].index
+                    else:
+                        selected_audio_index = (
+                            self.audio_streams[0].index if self.audio_streams else 0
+                        )
+                else:
+                    selected_audio_index = (
+                        self.audio_streams[0].index if self.audio_streams else 0
+                    )
+            else:
+                selected_subtitle = None
+                selected_audio_index = (
+                    self.audio_streams[0].index if self.audio_streams else 0
+                )
+            builder = FFmpegCommandBuilder()
+            use_copy = (
+                not self.advanced_enabled.get()
+                and not trimming
+                and input_w is not None
+                and input_h is not None
+                and input_fps is not None
             )
-            # Audio codec and bitrate or remove audio
-            if codec == "libvpx-vp9":
-                # WebM: use libopus for audio
-                if audio_bitrate == "Remove Audio":
-                    command.append("-an")
-                else:
-                    command.extend(["-acodec", "libopus", "-b:a", audio_bitrate])
+            if use_copy:
+                builder.with_input(input_path)
+                builder.with_extra(["-c:v", "copy", "-c:a", "copy"])
             else:
-                command.extend(["-acodec", "aac"])
-                if audio_bitrate == "Remove Audio":
-                    command.append("-an")
+                if trimming:
+                    start_seconds = self.time_to_seconds(self.start_time.get())
+                    duration = self.time_to_seconds(self.end_time.get()) - start_seconds
+                    builder.with_hybrid_trim(start_seconds, duration)
+                    builder.with_input(input_path)
+                    builder.with_post_input_trim(0, duration)
                 else:
-                    command.extend(["-b:a", audio_bitrate])
-            command.append(output_path)
-            # Calculate total duration for progress
-            if trim:
-                total_duration = duration
-            else:
-                total_duration = self.video_duration
-            if total_duration <= 0:
-                total_duration = 1  # Avoid division by zero
+                    builder.with_input(input_path)
+                if selected_subtitle is not None:
+                    if container_label in ("mp4", "webm"):
+                        sub_path = self.escape_subtitles_path(input_path)
+                        si_opt = f":si={selected_subtitle.map_index}"
+                        builder.with_subtitles(sub_path, si_opt)
+                        builder.with_video_settings(resolution, fps)
+                        builder.with_speed(speed_value)
+                        builder.with_extra(["-sn"])
+                    elif container_label == "mkv":
+                        builder.with_video_settings(resolution, fps)
+                        builder.with_speed(speed_value)
+                        builder.with_extra(
+                            [
+                                "-map",
+                                f"0:s:{selected_subtitle.map_index}",
+                                "-c:s",
+                                "copy",
+                            ]
+                        )
+                else:
+                    scale_needed = True
+                    fps_needed = True
+                    if input_w and input_h and resolution:
+                        try:
+                            w, h = map(int, resolution.split(":"))
+                            if w == input_w and h == input_h:
+                                scale_needed = False
+                        except Exception:
+                            pass
+                    if input_fps and fps:
+                        try:
+                            if float(fps) == float(input_fps):
+                                fps_needed = False
+                        except Exception:
+                            pass
+                    if scale_needed or fps_needed:
+                        builder.with_video_settings(
+                            resolution if scale_needed else None,
+                            fps if fps_needed else None,
+                        )
+                    builder.with_speed(speed_value)
+                    builder.with_extra(["-sn"])
+                map_args = ["-map", "0:v"]
+                if self.audio_streams:
+                    audio_idx = (
+                        self.audio_indices.index(selected_audio_index)
+                        if selected_audio_index in self.audio_indices
+                        else 0
+                    )
+                    map_args.extend(["-map", f"0:a:{audio_idx}"])
+                builder.with_map(map_args)
+                builder.with_codec(codec, crf, preset)
+                if audio_bitrate == "Remove Audio":
+                    builder.with_extra(["-an"])
+                else:
+                    builder.with_audio(
+                        "libopus" if codec == "libvpx-vp9" else "aac", audio_bitrate
+                    )
+            command = builder.build(output_path)
+            # Actually run the FFmpeg process and handle errors
+            import re
+
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
@@ -1451,11 +1874,13 @@ class ClipperGUI:
                 universal_newlines=True,
             )
             self.ffmpeg_process = process
-            import re
-
             time_pattern = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
             last_percent = 0
             ffmpeg_stderr = []
+            total_duration = duration if trimming else self.video_duration
+            if total_duration <= 0:
+                total_duration = 1
+            # Read stderr lines as they come, but also collect all output for error analysis
             while True:
                 if getattr(self, "cancel_requested", False):
                     try:
@@ -1482,7 +1907,12 @@ class ClipperGUI:
                     if percent != last_percent:
                         last_percent = percent
                         self.root.after(0, self.progress_bar.config, {"value": percent})
+            # After process ends, read any remaining stderr output (in case of buffer)
+            remaining = process.stderr.read()
+            if remaining:
+                ffmpeg_stderr.extend(remaining.splitlines())
             process.wait()
+            # Now check for errors as soon as process ends
             if process.returncode == 0:
                 self.root.after(
                     0,
@@ -1491,26 +1921,31 @@ class ClipperGUI:
                     "Video processing completed successfully!",
                 )
             else:
-                # Show actual ffmpeg error output with better formatting
                 error_lines = [line.strip() for line in ffmpeg_stderr if line.strip()]
-                # Find the most relevant error message (usually the last one)
+                # Check for Unicode libass error
+                unicode_libass_error = any(
+                    "libass wasn't built with ASS_FEATURE_WRAP_UNICODE support" in line
+                    for line in error_lines
+                )
+                if unicode_libass_error:
+                    user_msg = (
+                        "❌ FFmpeg/libass does not support Unicode subtitle line wrapping on your system.\n\n"
+                        "This is required to burn many non-English subtitles.\n\n"
+                        "To fix: Download the latest 'release full' build of FFmpeg from https://www.gyan.dev/ffmpeg/builds/ and replace your ffmpeg.exe."
+                    )
+                    self.root.after(0, self.processing_complete, False, user_msg)
+                    return
                 relevant_errors = []
-                for line in reversed(error_lines[-10:]):  # Look at last 10 lines
+                for line in reversed(error_lines[-10:]):
                     if any(
                         keyword in line.lower()
                         for keyword in ["error", "failed", "invalid", "not found"]
                     ):
                         relevant_errors.append(line)
-
                 if relevant_errors:
-                    error_output = "\n".join(
-                        relevant_errors[-3:]
-                    )  # Show last 3 relevant errors
+                    error_output = "\n".join(relevant_errors[-3:])
                 else:
-                    error_output = "\n".join(
-                        error_lines[-5:]
-                    )  # Show last 5 lines if no specific errors found
-
+                    error_output = "\n".join(error_lines[-20:])
                 self.root.after(
                     0,
                     self.processing_complete,
@@ -1538,7 +1973,7 @@ class ClipperGUI:
         self.cancel_requested = True
         self.cancel_btn.config(state="disabled")
         self.status_label.config(text="Cancelling...", style="Error.TLabel")
-        self.set_controls_state(False)
+        self.set_processing_ui_state(False)
 
         # Try graceful termination first
         if self.ffmpeg_process:
@@ -1566,11 +2001,13 @@ class ClipperGUI:
             self.custom_output_name.set("")
             self.selected_preset.set("medium")
             self.advanced_enabled.set(False)
-            self.selected_codec.set("H.264 (MP4)")
+            self.selected_codec.set("H.264")
             self.selected_crf.set("20")
             self.selected_fps.set("120")
             self.selected_audio_bitrate.set("128k")
             self.selected_resolution.set("1920x1080")
+            self.selected_container.set("mp4")
+            self.selected_speed.set("1.0x (Normal)")
             self.file_info_label.config(text="No file selected", style="Info.TLabel")
             self.status_label.config(text="Ready to process video", style="Info.TLabel")
             self.progress_bar["value"] = 0
@@ -1583,6 +2020,7 @@ class ClipperGUI:
             self.timeline_frame.grid_remove()
             self.advanced_frame.grid_remove()
             self.upload_frame.grid_remove()
+            self.track_selection_frame.grid_remove()
             self.last_output_path = None
             self.open_file_btn.grid_remove()
             self.show_in_explorer_btn.grid_remove()
@@ -1600,7 +2038,7 @@ class ClipperGUI:
         self.process_btn.config(state="normal")
         self.progress_bar["value"] = 100 if success else 0
         self.progress_bar.pack_forget()
-        self.set_controls_state(False)
+        self.set_processing_ui_state(False)
         if success:
             self.status_label.config(text="✅ " + message, style="Success.TLabel")
             messagebox.showinfo("Success", message)
@@ -1625,29 +2063,35 @@ class ClipperGUI:
                 self.fps_menu.config(state="normal")
                 self.audio_bitrate_menu.config(state="normal")
                 self.resolution_menu.config(state="normal")
+                self.container_menu.config(state="normal")
+                # Enable speed_menu
+                if hasattr(self, "speed_menu"):
+                    self.speed_menu.config(state="normal")
+                # Enable include_tracks_checkbox, subtitle_combobox, audio_combobox
+                if hasattr(self, "include_tracks_checkbox"):
+                    self.include_tracks_checkbox.config(state="normal")
+                if hasattr(self, "subtitle_combobox") and self.subtitle_combobox:
+                    self.subtitle_combobox.config(state="normal")
+                if hasattr(self, "audio_combobox") and self.audio_combobox:
+                    self.audio_combobox.config(state="normal")
         else:
             self.advanced_frame.grid_remove()
         self.root.update_idletasks()
         self.root.geometry("")
         self.root.update()
 
-    def upload_to_catbox(self):
+    def upload_to_selected_service(self):
+        selected_key = self.upload_service.get()
         if not self.last_output_path or not os.path.exists(self.last_output_path):
             messagebox.showerror("Error", "No processed video file found!")
             return
-
-        service = self.upload_service.get()
-
         # Validate file size before upload
-        if not self.validate_file_size_for_upload(self.last_output_path, service):
+        if not self.validate_file_size_for_upload(self.last_output_path, selected_key):
             return
-
         self.upload_btn.config(state="disabled", text="Uploading...")
         self.status_label.config(text="Uploading...", style="Info.TLabel")
-
-        # Start upload in background thread
         thread = threading.Thread(
-            target=self._upload_file, args=(self.last_output_path, service)
+            target=self._upload_file, args=(self.last_output_path, selected_key)
         )
         thread.daemon = True
         thread.start()
@@ -1662,10 +2106,7 @@ class ClipperGUI:
                 result_url = self._upload_to_tempsh(file_path)
             else:
                 raise Exception("Unknown upload service")
-
-            # Success
             self.root.after(0, self._upload_success, result_url)
-
         except Exception as e:
             self.root.after(0, self._upload_error, f"Upload error: {str(e)}")
 
@@ -1704,7 +2145,7 @@ class ClipperGUI:
         req.add_header("Content-Length", str(len(body)))
 
         # Upload file
-        with urllib.request.urlopen(req, timeout=60) as response:
+        with urllib.request.urlopen(req, timeout=600) as response:
             result_url = response.read().decode("utf-8").strip()
 
             if result_url.startswith("http"):
@@ -1781,8 +2222,8 @@ class ClipperGUI:
 
         # Create success message with expiration info
         success_msg = f"✅ Uploaded to {service}"
-        if service_info.get("expiration"):
-            success_msg += f" (expires: {service_info['expiration']})"
+        if service_info and getattr(service_info, "expiration", None):
+            success_msg += f" (expires: {service_info.expiration})"
 
         self.upload_btn.config(state="normal", text="Upload")
         self.status_label.config(text=success_msg, style="Success.TLabel")
@@ -1800,12 +2241,12 @@ class ClipperGUI:
                 pass
 
         # Show success alert
-        service_name = service_info.get("name", service)
+        service_name = (
+            getattr(service_info, "name", service) if service_info else service
+        )
         alert_msg = f"Video uploaded successfully to {service_name}!\n\nURL: {url}"
-        if service_info.get("expiration"):
-            alert_msg += (
-                f"\n\nNote: This file will expire in {service_info['expiration']}"
-            )
+        if service_info and getattr(service_info, "expiration", None):
+            alert_msg += f"\n\nNote: This file will expire in {service_info.expiration}"
         messagebox.showinfo("Upload Success", alert_msg)
 
         # Update window size to accommodate new content
@@ -1880,21 +2321,76 @@ class ClipperGUI:
             webbrowser.open(url)
 
     def on_codec_changed(self, event=None):
-        codec_label = self.selected_codec.get()
+        # Update extension based on container, not codec
         name = self.custom_output_name.get()
+        container_label = self.selected_container.get()
+        ext = ".mp4"
+        for label, val in CONTAINER_FORMATS:
+            if label == container_label:
+                ext = f".{val}"
+        if not name.endswith(ext):
+            name_path = Path(name)
+            self.custom_output_name.set(str(name_path.with_suffix(ext)))
 
-        if codec_label == "WebM (VP9)":
-            # Change output extension to .webm
-            if not name.endswith(".webm"):
-                # Use Path to reliably extract name without extension
-                name_path = Path(name)
-                self.custom_output_name.set(str(name_path.with_suffix("")) + ".webm")
+    def toggle_track_selection(self):
+        if self.include_tracks.get():
+            self.track_selection_frame.grid()
         else:
-            # Change output extension to .mp4
-            if not name.endswith(".mp4"):
-                # Use Path to reliably extract name without extension
-                name_path = Path(name)
-                self.custom_output_name.set(str(name_path.with_suffix("")) + ".mp4")
+            self.track_selection_frame.grid_remove()
+        self.root.update_idletasks()
+        self.root.geometry("")
+
+    def setup_track_selection_ui(self, subtitle_streams, audio_streams):
+        # Always use single-select combobox for both
+        for widget in self.subtitle_combobox_holder.winfo_children():
+            widget.destroy()
+        for widget in self.audio_combobox_holder.winfo_children():
+            widget.destroy()
+        self.subtitle_combobox = None
+        self.audio_combobox = None
+        if subtitle_streams:
+            self.subtitle_combobox_holder.grid()
+            frame = ttk.Frame(self.subtitle_combobox_holder)
+            frame.pack(fill="both", expand=True)
+            self.subtitle_combobox = ttk.Combobox(
+                frame, state="readonly", width=30, font=("Segoe UI", 9)
+            )
+            self.subtitle_combobox.pack(fill="x", padx=4, pady=4)
+            values = ["None"]
+            for stream in subtitle_streams:
+                label = f"[{stream.index}] {stream.language}"
+                if stream.title:
+                    label += f" | {stream.title}"
+                values.append(label)
+            self.subtitle_combobox["values"] = values
+            self.subtitle_combobox.current(0)
+        else:
+            self.subtitle_combobox_holder.grid_remove()
+        if audio_streams:
+            self.audio_combobox_holder.grid()
+            frame = ttk.Frame(self.audio_combobox_holder)
+            frame.pack(fill="both", expand=True)
+            self.audio_combobox = ttk.Combobox(
+                frame, state="readonly", width=30, font=("Segoe UI", 9)
+            )
+            self.audio_combobox.pack(fill="x", padx=4, pady=4)
+            values = []
+            for stream in audio_streams:
+                label = f"[{stream.index}] {stream.language}"
+                if stream.title:
+                    label += f" | {stream.title}"
+                values.append(label)
+            self.audio_combobox["values"] = values
+            if values:
+                self.audio_combobox.current(0)
+        else:
+            self.audio_combobox_holder.grid_remove()
+
+    def on_container_changed(self, event=None):
+        """Handle container format changes to update track selection UI."""
+        # Re-setup the track selection UI with the new container format
+        if hasattr(self, "subtitle_streams") and hasattr(self, "audio_streams"):
+            self.setup_track_selection_ui(self.subtitle_streams, self.audio_streams)
 
     def check_ffmpeg_installation(self) -> bool:
         """
@@ -1924,7 +2420,7 @@ class ClipperGUI:
 
         Args:
             file_path: Path to the file to upload
-            service: Upload service name (catbox, uguu, tempsh)
+            service: Upload service key (catbox, uguu, tempsh)
 
         Returns:
             True if file size is acceptable, False otherwise
@@ -1932,15 +2428,12 @@ class ClipperGUI:
         try:
             file_size_bytes = os.path.getsize(file_path)
             file_size_mb = file_size_bytes / (1024 * 1024)  # Convert to MB
-
-            service_config = UPLOAD_SERVICES.get(service)
+            service_config = get_upload_service_by_key(service)
             if not service_config:
                 messagebox.showerror("Error", f"Unknown upload service: {service}")
                 return False
-
-            max_size_mb = service_config["max_size_mb"]
-            service_name = service_config["name"]
-
+            max_size_mb = service_config.max_size_mb
+            service_name = service_config.name
             if file_size_mb > max_size_mb:
                 messagebox.showerror(
                     "File Too Large",
@@ -1948,24 +2441,92 @@ class ClipperGUI:
                     f"Please choose a different upload service or reduce the file size.",
                 )
                 return False
-
             return True
-
         except (OSError, FileNotFoundError) as e:
             messagebox.showerror("Error", f"Could not check file size: {e}")
             return False
 
-    def get_upload_service_info(self, service: str) -> dict:
+    def get_upload_service_info(self, service: str) -> Optional[UploadService]:
         """
-        Get information about an upload service.
-
-        Args:
-            service: Upload service name (catbox, uguu, tempsh)
-
-        Returns:
-            Dictionary with service information
+        Get information about an upload service as a dataclass.
         """
-        return UPLOAD_SERVICES.get(service, {})
+        return get_upload_service_by_key(service)
+
+    def get_video_subtitle_streams(self, video_path) -> List[SubtitleStream]:
+        """
+        Return a list of SubtitleStream dataclass objects using ffprobe.
+        """
+        try:
+            cmd = [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "s",
+                "-show_entries",
+                "stream=index,codec_name:stream_tags=language,title",
+                "-of",
+                "json",
+                video_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            data = json.loads(result.stdout)
+            streams = data.get("streams", [])
+            subtitle_streams = []
+            for i, s in enumerate(streams):
+                tags = s.get("tags", {})
+                subtitle_streams.append(
+                    SubtitleStream(
+                        index=s.get("index", i),
+                        map_index=i,
+                        codec_name=s.get("codec_name", ""),
+                        language=tags.get("language", "und"),
+                        title=tags.get("title", ""),
+                    )
+                )
+            return subtitle_streams
+        except Exception:
+            return []
+
+    def get_video_audio_streams(self, video_path) -> List[AudioStream]:
+        """
+        Return a list of AudioStream dataclass objects using ffprobe.
+        """
+        try:
+            cmd = [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=index,codec_name:stream_tags=language,title",
+                "-of",
+                "json",
+                video_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            data = json.loads(result.stdout)
+            streams = data.get("streams", [])
+            audio_streams = []
+            for s in streams:
+                tags = s.get("tags", {})
+                audio_streams.append(
+                    AudioStream(
+                        index=s.get("index", 0),
+                        codec_name=s.get("codec_name", ""),
+                        language=tags.get("language", "und"),
+                        title=tags.get("title", ""),
+                    )
+                )
+            return audio_streams
+        except Exception:
+            return []
+
+    def escape_subtitles_path(self, path):
+        # For FFmpeg subtitles filter on Windows: use forward slashes and escape colons
+        path = os.path.abspath(path).replace("\\", "/").replace(":", "\\:")
+        return path
 
 
 def main() -> None:
